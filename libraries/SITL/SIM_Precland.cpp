@@ -85,7 +85,7 @@ const AP_Param::GroupInfo SIM_Precland::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("TYPE", 6, SIM_Precland, _type, SIM_Precland::PRECLAND_TYPE_CYLINDER),
 
-    // @Param: ALT_LMT
+    // @Param: ALT_LIMIT
     // @DisplayName: Precland device alt range
     // @Description: Precland device maximum range altitude
     // @Units: m
@@ -93,7 +93,7 @@ const AP_Param::GroupInfo SIM_Precland::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("ALT_LMT", 7, SIM_Precland, _alt_limit, 15),
 
-    // @Param: DIST_LMT
+    // @Param: DIST_LIMIT
     // @DisplayName: Precland device lateral range
     // @Description: Precland device maximum lateral range
     // @Units: m

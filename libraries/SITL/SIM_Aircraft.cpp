@@ -37,19 +37,18 @@
 
 using namespace SITL;
 
-extern const AP_HAL::HAL& hal;
+extern const AP_HAL::HAL &hal;
 
 // the SITL HAL can add information about pausing the simulation and its effect on the UART.  Not present when we're compiling for simulation-on-hardware
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-extern const HAL_SITL& hal_sitl;
+extern const HAL_SITL &hal_sitl;
 #endif
 
 /*
   parent class for all simulator types
  */
 
-Aircraft::Aircraft(const char *frame_str) :
-    frame(frame_str)
+Aircraft::Aircraft(const char *frame_str) : frame(frame_str)
 {
     // make the SIM_* variables available to simulator backends
     sitl = AP::sitl();
@@ -63,16 +62,18 @@ Aircraft::Aircraft(const char *frame_str) :
     ahrs_orientation = (AP_Int8 *)AP_Param::find("AHRS_ORIENTATION", &ptype);
 
     // ahrs_orientation->get() returns ROTATION_NONE here, regardless of the actual value
-    enum Rotation imu_rotation = ahrs_orientation?(enum Rotation)ahrs_orientation->get():ROTATION_NONE;
+    enum Rotation imu_rotation = ahrs_orientation ? (enum Rotation)ahrs_orientation->get() : ROTATION_NONE;
     last_imu_rotation = imu_rotation;
     // sitl is null if running example program
-    if (sitl) {
+    if (sitl)
+    {
         sitl->ahrs_rotation.from_rotation(imu_rotation);
         sitl->ahrs_rotation_inv = sitl->ahrs_rotation.transposed();
     }
 
     // init rangefinder array to NaN to signify no data
-    for (uint8_t i = 0; i < ARRAY_SIZE(rangefinder_m); i++){
+    for (uint8_t i = 0; i < ARRAY_SIZE(rangefinder_m); i++)
+    {
         rangefinder_m[i] = nanf("");
     }
 }
@@ -86,9 +87,9 @@ void Aircraft::set_start_location(const Location &start_loc, const float start_y
     home_is_set = true;
 
     ::printf("Home: %f %f alt=%fm hdg=%f\n",
-             home.lat*1e-7,
-             home.lng*1e-7,
-             home.alt*0.01,
+             home.lat * 1e-7,
+             home.lng * 1e-7,
+             home.alt * 0.01,
              home_yaw);
 
     location = home;
@@ -114,7 +115,8 @@ float Aircraft::ground_height_difference() const
         terrain != nullptr &&
         sitl->terrain_enable &&
         terrain->height_amsl(home, h1, false) &&
-        terrain->height_amsl(location, h2, false)) {
+        terrain->height_amsl(location, h2, false))
+    {
         h2 += local_ground_level;
         return h2 - h1;
     }
@@ -122,17 +124,8 @@ float Aircraft::ground_height_difference() const
     return local_ground_level;
 }
 
-float Aircraft::ambient_temperature_degC() const
+void Aircraft::set_precland(SIM_Precland *_precland)
 {
-    // FIXME: AP_Baro_SITL should be getting temperature from the
-    // simulated aircraft, not the other way around!
-#if !APM_BUILD_TYPE(APM_BUILD_AP_Periph)    // Periph does not instantiate Baro
-    return AP::baro().get_temperature();
-#endif
-    return 25.0;
-}
-
-void Aircraft::set_precland(SIM_Precland *_precland) {
     precland = _precland;
     precland->set_default_location(home.lat * 1.0e-7f, home.lng * 1.0e-7f, static_cast<int16_t>(get_home_yaw()));
 }
@@ -150,7 +143,115 @@ float Aircraft::hagl() const
 */
 bool Aircraft::on_ground() const
 {
-    return hagl() <= 0.001f;  // prevent bouncing around ground
+    return hagl() <= 0.001f; // prevent bouncing around ground
+}
+
+// BEGIN IAN CHANGES
+
+struct SITLPositionData
+{
+    double lat;
+    double lon;
+    float alt;
+    float vx;
+    float vy;
+    float vz;
+};
+
+// In Aircraft class
+
+void Aircraft::init_udp_stream(void)
+{
+    if (udp_initialized)
+    {
+        return;
+    }
+
+    udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_socket < 0)
+    {
+        printf("Failed to create UDP socket: %s (errno: %d)\n", strerror(errno), errno);
+        return;
+    }
+
+    // Set socket options to allow reuse of address/port
+    int enable = 1;
+    if (setsockopt(udp_socket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0)
+    {
+        printf("Failed to set SO_REUSEADDR: %s (errno: %d)\n", strerror(errno), errno);
+        close(udp_socket);
+        return;
+    }
+
+    memset(&udp_addr, 0, sizeof(udp_addr));
+    udp_addr.sin_family = AF_INET;
+    udp_addr.sin_port = htons(14660);
+    udp_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    udp_initialized = true;
+    printf("UDP stream initialized on port 14660\n");
+}
+void Aircraft::send_position_data(const Vector3d &pos, const Vector3f &vel)
+{
+    if (!udp_initialized)
+    {
+        init_udp_stream();
+        if (!udp_initialized)
+        {
+            return;
+        }
+    }
+
+    if (udp_socket < 0)
+    {
+        printf("Invalid UDP socket file descriptor: %d\n", udp_socket);
+        return;
+    }
+
+    struct
+    {
+        double x;                   // 8 bytes
+        double y;                   // 8 bytes
+        float z;                    // 4 bytes
+        float vx;                   // 4 bytes
+        float vy;                   // 4 bytes
+        float vz;                   // 4 bytes
+    } __attribute__((packed)) data; // Total: 32 bytes
+
+    printf("Size of data struct: %zu bytes\n", sizeof(data));
+
+    data.x = pos.x;
+    data.y = pos.y;
+    data.z = pos.z;
+    data.vx = vel.x;
+    data.vy = vel.y;
+    data.vz = vel.z;
+
+    // Print the data being sent
+    printf("Sending position data:\n");
+    printf("Position - x: %.6f, y: %.6f, z: %.2f\n", data.x, data.y, data.z);
+    printf("Velocity - vx: %.2f, vy: %.2f, vz: %.2f\n", data.vx, data.vy, data.vz);
+
+    // Print raw bytes (useful for debugging)
+    printf("Raw bytes: ");
+    unsigned char *bytes = (unsigned char *)&data;
+    for (size_t i = 0; i < sizeof(data); i++)
+    {
+        printf("%02x ", bytes[i]);
+    }
+    printf("\n");
+
+    ssize_t sent = sendto(udp_socket, &data, sizeof(data), 0,
+                          (struct sockaddr *)&udp_addr, sizeof(udp_addr));
+
+    if (sent < 0)
+    {
+        printf("Failed to send UDP data: %s\n", strerror(errno));
+    }
+    else
+    {
+        printf("Successfully sent %zd bytes\n", sent);
+    }
 }
 
 /*
@@ -158,11 +259,18 @@ bool Aircraft::on_ground() const
 */
 void Aircraft::update_position(void)
 {
+    static int update_counter = 0;
+
+    Vector3d simulated_position = position;
+
+    if (++update_counter >= 125)
+    {
+        // Send position data via UDP
+        send_position_data(simulated_position, velocity_ef);
+        update_counter = 0;
+    }
+
     location = origin;
-    location.offset(position.x, position.y);
-
-    location.alt  = static_cast<int32_t>(home.alt - position.z * 100.0f);
-
 #if 0
     Vector3d pos_home = position;
     pos_home.xy() += home.get_distance_NE_double(origin);
@@ -188,9 +296,11 @@ void Aircraft::update_position(void)
                                            pos_home.x, pos_home.y, pos_home.z);
 #endif
 
-    if (!disable_origin_movement) {
+    if (!disable_origin_movement)
+    {
         uint32_t now = AP_HAL::millis();
-        if (now - last_one_hz_ms >= 1000) {
+        if (now - last_one_hz_ms >= 1000)
+        {
             // shift origin of position at 1Hz to current location
             // this prevents spherical errors building up in the GPS data
             last_one_hz_ms = now;
@@ -223,7 +333,8 @@ void Aircraft::update_mag_field_bf()
     // calculate frame height above ground
     const float frame_height_agl = fmaxf((-position.z) + home.alt * 0.01f - ground_level, 0.0f);
 
-    if (!sitl) {
+    if (!sitl)
+    {
         // running example program
         return;
     }
@@ -248,11 +359,13 @@ void Aircraft::time_advance()
 {
     // we only advance time if it hasn't been advanced already by the
     // backend
-    if (last_time_us == time_now_us) {
+    if (last_time_us == time_now_us)
+    {
         time_now_us += frame_time_us;
     }
     last_time_us = time_now_us;
-    if (use_time_sync) {
+    if (use_time_sync)
+    {
         sync_frame_time();
     }
 }
@@ -262,7 +375,7 @@ void Aircraft::setup_frame_time(float new_rate, float new_speedup)
 {
     rate_hz = new_rate;
     target_speedup = new_speedup;
-    frame_time_us = uint64_t(1.0e6f/rate_hz);
+    frame_time_us = uint64_t(1.0e6f / rate_hz);
 
     last_wall_time_us = get_wall_time_us();
 }
@@ -270,7 +383,7 @@ void Aircraft::setup_frame_time(float new_rate, float new_speedup)
 /* adjust frame_time calculation */
 void Aircraft::adjust_frame_time(float new_rate)
 {
-    frame_time_us = uint64_t(1.0e6f/new_rate);
+    frame_time_us = uint64_t(1.0e6f / new_rate);
     rate_hz = new_rate;
 }
 
@@ -286,16 +399,18 @@ void Aircraft::sync_frame_time(void)
     uint64_t now = get_wall_time_us();
     uint64_t dt_us = now - last_wall_time_us;
 
-    const float target_dt_us = 1.0e6/(rate_hz*target_speedup);
+    const float target_dt_us = 1.0e6 / (rate_hz * target_speedup);
 
     // accumulate sleep debt if we're running too fast
     sleep_debt_us += target_dt_us - dt_us;
 
-    if (sleep_debt_us < -1.0e5) {
+    if (sleep_debt_us < -1.0e5)
+    {
         // don't let a large negative debt build up
         sleep_debt_us = -1.0e5;
     }
-    if (sleep_debt_us > min_sleep_time) {
+    if (sleep_debt_us > min_sleep_time)
+    {
         // sleep if we have built up a debt of min_sleep_tim
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
         usleep(sleep_debt_us);
@@ -310,7 +425,8 @@ void Aircraft::sync_frame_time(void)
 
     uint32_t now_ms = last_wall_time_us / 1000ULL;
     float dt_wall = (now_ms - last_fps_report_ms) * 0.001;
-    if (dt_wall > 0.01) {  // 0.01s average
+    if (dt_wall > 0.01)
+    { // 0.01s average
         achieved_rate_hz = (frame_counter - last_frame_count) / dt_wall;
 #if 0
         ::printf("Rate: target:%.1f achieved:%.1f speedup %.1f/%.1f\n",
@@ -327,10 +443,12 @@ void Aircraft::add_noise(float throttle)
 {
     gyro += Vector3f(rand_normal(0, 1),
                      rand_normal(0, 1),
-                     rand_normal(0, 1)) * gyro_noise * fabsf(throttle);
+                     rand_normal(0, 1)) *
+            gyro_noise * fabsf(throttle);
     accel_body += Vector3f(rand_normal(0, 1),
                            rand_normal(0, 1),
-                           rand_normal(0, 1)) * accel_noise * fabsf(throttle);
+                           rand_normal(0, 1)) *
+                  accel_noise * fabsf(throttle);
 }
 
 /*
@@ -342,28 +460,28 @@ double Aircraft::rand_normal(double mean, double stddev)
 {
     static double n2 = 0.0;
     static int n2_cached = 0;
-    if (!n2_cached) {
+    if (!n2_cached)
+    {
         double x, y, r;
         do
         {
-            x = 2.0 * rand()/RAND_MAX - 1;
-            y = 2.0 * rand()/RAND_MAX - 1;
-            r = x*x + y*y;
+            x = 2.0 * rand() / RAND_MAX - 1;
+            y = 2.0 * rand() / RAND_MAX - 1;
+            r = x * x + y * y;
         } while (is_zero(r) || r > 1.0);
-        const double d = sqrt(-2.0 * log(r)/r);
+        const double d = sqrt(-2.0 * log(r) / r);
         const double n1 = x * d;
         n2 = y * d;
         const double result = n1 * stddev + mean;
         n2_cached = 1;
         return result;
-    } else {
+    }
+    else
+    {
         n2_cached = 0;
         return n2 * stddev + mean;
     }
 }
-
-
-
 
 /*
    fill a sitl_fdm structure from the simulator state
@@ -371,34 +489,36 @@ double Aircraft::rand_normal(double mean, double stddev)
 void Aircraft::fill_fdm(struct sitl_fdm &fdm)
 {
     bool is_smoothed = false;
-    if (use_smoothing) {
+    if (use_smoothing)
+    {
         smooth_sensors();
         is_smoothed = true;
     }
     fdm.timestamp_us = time_now_us;
-    if (fdm.home.lat == 0 && fdm.home.lng == 0) {
+    if (fdm.home.lat == 0 && fdm.home.lng == 0)
+    {
         // initialise home
         fdm.home = home;
     }
     fdm.is_lock_step_scheduled = lock_step_scheduled;
-    fdm.latitude  = location.lat * 1.0e-7;
+    fdm.latitude = location.lat * 1.0e-7;
     fdm.longitude = location.lng * 1.0e-7;
-    fdm.altitude  = location.alt * 1.0e-2;
-    fdm.heading   = degrees(atan2f(velocity_ef.y, velocity_ef.x));
-    fdm.speedN    = velocity_ef.x;
-    fdm.speedE    = velocity_ef.y;
-    fdm.speedD    = velocity_ef.z;
-    fdm.xAccel    = accel_body.x;
-    fdm.yAccel    = accel_body.y;
-    fdm.zAccel    = accel_body.z;
-    fdm.rollRate  = degrees(gyro.x);
+    fdm.altitude = location.alt * 1.0e-2;
+    fdm.heading = degrees(atan2f(velocity_ef.y, velocity_ef.x));
+    fdm.speedN = velocity_ef.x;
+    fdm.speedE = velocity_ef.y;
+    fdm.speedD = velocity_ef.z;
+    fdm.xAccel = accel_body.x;
+    fdm.yAccel = accel_body.y;
+    fdm.zAccel = accel_body.z;
+    fdm.rollRate = degrees(gyro.x);
     fdm.pitchRate = degrees(gyro.y);
-    fdm.yawRate   = degrees(gyro.z);
+    fdm.yawRate = degrees(gyro.z);
     float r, p, y;
     dcm.to_euler(&r, &p, &y);
-    fdm.rollDeg  = degrees(r);
+    fdm.rollDeg = degrees(r);
     fdm.pitchDeg = degrees(p);
-    fdm.yawDeg   = degrees(y);
+    fdm.yawDeg = degrees(y);
     fdm.quaternion.from_rotation_matrix(dcm);
     fdm.airspeed = airspeed_pitot;
     fdm.velocity_air_bf = velocity_air_bf;
@@ -423,47 +543,52 @@ void Aircraft::fill_fdm(struct sitl_fdm &fdm)
 
     fdm.wind_ef = wind_ef;
 
-    if (is_smoothed) {
+    if (is_smoothed)
+    {
         fdm.xAccel = smoothing.accel_body.x;
         fdm.yAccel = smoothing.accel_body.y;
         fdm.zAccel = smoothing.accel_body.z;
-        fdm.rollRate  = degrees(smoothing.gyro.x);
+        fdm.rollRate = degrees(smoothing.gyro.x);
         fdm.pitchRate = degrees(smoothing.gyro.y);
-        fdm.yawRate   = degrees(smoothing.gyro.z);
-        fdm.speedN    = smoothing.velocity_ef.x;
-        fdm.speedE    = smoothing.velocity_ef.y;
-        fdm.speedD    = smoothing.velocity_ef.z;
-        fdm.latitude  = smoothing.location.lat * 1.0e-7;
+        fdm.yawRate = degrees(smoothing.gyro.z);
+        fdm.speedN = smoothing.velocity_ef.x;
+        fdm.speedE = smoothing.velocity_ef.y;
+        fdm.speedD = smoothing.velocity_ef.z;
+        fdm.latitude = smoothing.location.lat * 1.0e-7;
         fdm.longitude = smoothing.location.lng * 1.0e-7;
-        fdm.altitude  = smoothing.location.alt * 1.0e-2;
+        fdm.altitude = smoothing.location.alt * 1.0e-2;
     }
 
-
-    if (ahrs_orientation != nullptr) {
+    if (ahrs_orientation != nullptr)
+    {
         enum Rotation imu_rotation = (enum Rotation)ahrs_orientation->get();
-        if (imu_rotation != last_imu_rotation) {
+        if (imu_rotation != last_imu_rotation)
+        {
             sitl->ahrs_rotation.from_rotation(imu_rotation);
             sitl->ahrs_rotation_inv = sitl->ahrs_rotation.transposed();
             last_imu_rotation = imu_rotation;
         }
-        if (imu_rotation != ROTATION_NONE) {
+        if (imu_rotation != ROTATION_NONE)
+        {
             Matrix3f m = dcm;
             m = m * sitl->ahrs_rotation_inv;
 
             m.to_euler(&r, &p, &y);
-            fdm.rollDeg  = degrees(r);
+            fdm.rollDeg = degrees(r);
             fdm.pitchDeg = degrees(p);
-            fdm.yawDeg   = degrees(y);
+            fdm.yawDeg = degrees(y);
             fdm.quaternion.from_rotation_matrix(m);
         }
     }
 
     // in the first call here, if a speedup option is specified, overwrite it
-    if (is_equal(last_speedup, -1.0f) && !is_equal(get_speedup(), 1.0f)) {
+    if (is_equal(last_speedup, -1.0f) && !is_equal(get_speedup(), 1.0f))
+    {
         sitl->speedup.set(get_speedup());
     }
-    
-    if (!is_equal(last_speedup, float(sitl->speedup)) && sitl->speedup > 0) {
+
+    if (!is_equal(last_speedup, float(sitl->speedup)) && sitl->speedup > 0)
+    {
         set_speedup(sitl->speedup);
         last_speedup = sitl->speedup;
     }
@@ -480,20 +605,21 @@ void Aircraft::fill_fdm(struct sitl_fdm &fdm)
     // for EKF comparison log relhome pos and velocity at loop rate
     static uint16_t last_ticks;
     uint16_t ticks = AP::scheduler().ticks();
-    if (last_ticks != ticks) {
+    if (last_ticks != ticks)
+    {
         last_ticks = ticks;
-// @LoggerMessage: SIM2
-// @Description: Additional simulator state
-// @Field: TimeUS: Time since system startup
-// @Field: PN: North position from home
-// @Field: PE: East position from home
-// @Field: PD: Down position from home
-// @Field: VN: Velocity north
-// @Field: VE: Velocity east
-// @Field: VD: Velocity down
-// @Field: As: Airspeed
-// @Field: ASpdU: Achieved simulation speedup value
-// @Field: UFC: Number of times simulation paused for serial0 output
+        // @LoggerMessage: SIM2
+        // @Description: Additional simulator state
+        // @Field: TimeUS: Time since system startup
+        // @Field: PN: North position from home
+        // @Field: PE: East position from home
+        // @Field: PD: Down position from home
+        // @Field: VN: Velocity north
+        // @Field: VE: Velocity east
+        // @Field: VD: Velocity down
+        // @Field: As: Airspeed
+        // @Field: ASpdU: Achieved simulation speedup value
+        // @Field: UFC: Number of times simulation paused for serial0 output
         Vector3d pos = get_position_relhome();
         Vector3f vel = get_velocity_ef();
         AP::logger().WriteStreaming(
@@ -504,9 +630,8 @@ void Aircraft::fill_fdm(struct sitl_fdm &fdm)
             pos.x, pos.y, pos.z,
             vel.x, vel.y, vel.z,
             airspeed_pitot,
-            achieved_rate_hz/rate_hz,
-            full_count
-        );
+            achieved_rate_hz / rate_hz,
+            full_count);
     }
 #endif
 }
@@ -524,9 +649,10 @@ float Aircraft::perpendicular_distance_to_rangefinder_surface() const
 {
 #if SITL_RANGEFINDER_AS_OBJECT_SENSOR
     const auto orientation = (Rotation)sitl->sonar_rot.get();
-    if (SITL_RANGEFINDER_IS_YAW_ONLY(orientation)) {
+    if (SITL_RANGEFINDER_IS_YAW_ONLY(orientation))
+    {
         // assume these are avoidance sensors
-        return sitl->measure_distance_at_angle_bf(location, sitl->sonar_rot.get()*45);
+        return sitl->measure_distance_at_angle_bf(location, sitl->sonar_rot.get() * 45);
     }
 #endif
 
@@ -536,6 +662,43 @@ float Aircraft::perpendicular_distance_to_rangefinder_surface() const
 
 float Aircraft::rangefinder_range() const
 {
+
+    float roll = sitl->state.rollDeg;
+    float pitch = sitl->state.pitchDeg;
+
+    if (roll > 0)
+    {
+        roll -= rangefinder_beam_width();
+        if (roll < 0)
+        {
+            roll = 0;
+        }
+    }
+    else
+    {
+        roll += rangefinder_beam_width();
+        if (roll > 0)
+        {
+            roll = 0;
+        }
+    }
+    if (pitch > 0)
+    {
+        pitch -= rangefinder_beam_width();
+        if (pitch < 0)
+        {
+            pitch = 0;
+        }
+    }
+    else
+    {
+        pitch += rangefinder_beam_width();
+        if (pitch > 0)
+        {
+            pitch = 0;
+        }
+    }
+
     float altitude = perpendicular_distance_to_rangefinder_surface();
 
     // sensor position offset in body frame
@@ -543,7 +706,8 @@ float Aircraft::rangefinder_range() const
 
     // n.b. the following code is assuming rotation-pitch-270:
     // adjust altitude for position of the sensor on the vehicle if position offset is non-zero
-    if (!relPosSensorBF.is_zero()) {
+    if (!relPosSensorBF.is_zero())
+    {
         // get a rotation matrix following DCM conventions (body to earth)
         Matrix3f rotmat;
         sitl->state.quaternion.rotation_matrix(rotmat);
@@ -555,43 +719,19 @@ float Aircraft::rangefinder_range() const
 
     const auto orientation = (Rotation)sitl->sonar_rot.get();
 #if SITL_RANGEFINDER_AS_OBJECT_SENSOR
-
-    float roll = sitl->state.rollDeg;
-    float pitch = sitl->state.pitchDeg;
-
-    if (roll > 0) {
-        roll -= rangefinder_beam_width();
-        if (roll < 0) {
-            roll = 0;
-        }
-    } else {
-        roll += rangefinder_beam_width();
-        if (roll > 0) {
-            roll = 0;
-        }
-    }
-    if (pitch > 0) {
-        pitch -= rangefinder_beam_width();
-        if (pitch < 0) {
-            pitch = 0;
-        }
-    } else {
-        pitch += rangefinder_beam_width();
-        if (pitch > 0) {
-            pitch = 0;
-        }
-    }
-
     /*
       rover and copter using SITL rangefinders as obstacle sensors
      */
-    if (SITL_RANGEFINDER_IS_YAW_ONLY(orientation)) {
-        if (fabs(roll) >= 90.0 || fabs(pitch) >= 90.0) {
+    if (SITL_RANGEFINDER_IS_YAW_ONLY(orientation))
+    {
+        if (fabs(roll) >= 90.0 || fabs(pitch) >= 90.0)
+        {
             // not going to hit the ground....
             return INFINITY;
         }
         altitude /= cosf(radians(roll)) * cosf(radians(pitch));
-    } else
+    }
+    else
 #endif
     {
         // adjust for rotation based on orientation of the sensor
@@ -601,7 +741,8 @@ float Aircraft::rangefinder_range() const
         v.rotate(orientation);
         v = rotmat * v;
 
-        if (!is_positive(v.z)) {
+        if (!is_positive(v.z))
+        {
             return INFINITY;
         }
         altitude /= v.z;
@@ -611,7 +752,8 @@ float Aircraft::rangefinder_range() const
         // with a ridiculous rangefinder range, and that can cause
         // floating point exceptions when we return a distance in cm
         // from the AP_RangeFinder_SITL.
-        if (altitude > 100000) {
+        if (altitude > 100000)
+        {
             return INFINITY;
         }
     }
@@ -623,7 +765,10 @@ float Aircraft::rangefinder_range() const
 }
 
 #if defined(__CYGWIN__) || defined(__CYGWIN64__)
-extern "C" { uint32_t timeGetTime(); }
+extern "C"
+{
+    uint32_t timeGetTime();
+}
 #endif
 
 // potentially replace this with a call to AP_HAL::Util::get_hw_rtc
@@ -632,12 +777,13 @@ uint64_t Aircraft::get_wall_time_us() const
 #if defined(__CYGWIN__) || defined(__CYGWIN64__)
     static uint32_t tPrev;
     static uint64_t last_ret_us;
-    if (tPrev == 0) {
+    if (tPrev == 0)
+    {
         tPrev = timeGetTime();
         return 0;
     }
     uint32_t now = timeGetTime();
-    last_ret_us += (uint64_t)((now - tPrev)*1000UL);
+    last_ret_us += (uint64_t)((now - tPrev) * 1000UL);
     tPrev = now;
     return last_ret_us;
 #elif CONFIG_HAL_BOARD == HAL_BOARD_SITL
@@ -659,8 +805,10 @@ void Aircraft::set_speedup(float speedup)
 
 void Aircraft::update_home()
 {
-    if (!home_is_set) {
-        if (sitl == nullptr) {
+    if (!home_is_set)
+    {
+        if (sitl == nullptr)
+        {
             return;
         }
         Location loc;
@@ -674,9 +822,12 @@ void Aircraft::update_home()
 void Aircraft::update_model(const struct sitl_input &input)
 {
     local_ground_level = 0.0f;
-    if (sitl != nullptr) {
+    if (sitl != nullptr)
+    {
         update(input);
-    } else {
+    }
+    else
+    {
         time_advance();
     }
 }
@@ -695,8 +846,8 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
     const float delta_time = frame_time_us * 1.0e-6f;
 
     // update eas2tas and air density
-    eas2tas = AP_Baro::get_EAS2TAS_for_alt_amsl(location.alt*0.01);
-    air_density = AP_Baro::get_air_density_for_alt_amsl(location.alt*0.01);
+    eas2tas = AP_Baro::get_EAS2TAS_for_alt_amsl(location.alt * 0.01);
+    air_density = AP_Baro::get_air_density_for_alt_amsl(location.alt * 0.01);
 
     // update rotational rates in body frame
     gyro += rot_accel * delta_time;
@@ -706,7 +857,7 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
     gyro.z = constrain_float(gyro.z, -radians(2000.0f), radians(2000.0f));
 
     // limit body accel to 64G
-    const float accel_limit = 64*GRAVITY_MSS;
+    const float accel_limit = 64 * GRAVITY_MSS;
     accel_body.x = constrain_float(accel_body.x, -accel_limit, accel_limit);
     accel_body.y = constrain_float(accel_body.y, -accel_limit, accel_limit);
     accel_body.z = constrain_float(accel_body.z, -accel_limit, accel_limit);
@@ -720,7 +871,8 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
 
     // if we're on the ground, then our vertical acceleration is limited
     // to zero. This effectively adds the force of the ground on the aircraft
-    if (on_ground() && accel_earth.z > 0) {
+    if (on_ground() && accel_earth.z > 0)
+    {
         accel_earth.z = 0;
     }
 
@@ -745,8 +897,10 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
     update_eas_airspeed();
 
     // constrain height to the ground
-    if (on_ground()) {
-        if (!was_on_ground && AP_HAL::millis() - last_ground_contact_ms > 1000) {
+    if (on_ground())
+    {
+        if (!was_on_ground && AP_HAL::millis() - last_ground_contact_ms > 1000)
+        {
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SIM Hit ground at %f m/s", velocity_ef.z);
             last_ground_contact_ms = AP_HAL::millis();
         }
@@ -760,10 +914,12 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
 #else
         const Vector3f gnd_movement;
 #endif
-        switch (ground_behavior) {
+        switch (ground_behavior)
+        {
         case GROUND_BEHAVIOR_NONE:
             break;
-        case GROUND_BEHAVIOR_NO_MOVEMENT: {
+        case GROUND_BEHAVIOR_NO_MOVEMENT:
+        {
             // zero roll/pitch, but keep yaw
             float r, p, y;
             dcm.to_euler(&r, &p, &y);
@@ -772,22 +928,27 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
             // X, Y movement tracks ground movement
             velocity_ef.x = gnd_movement.x;
             velocity_ef.y = gnd_movement.y;
-            if (velocity_ef.z > 0.0f) {
+            if (velocity_ef.z > 0.0f)
+            {
                 velocity_ef.z = 0.0f;
             }
             gyro.zero();
             use_smoothing = true;
             break;
         }
-        case GROUND_BEHAVIOR_FWD_ONLY: {
+        case GROUND_BEHAVIOR_FWD_ONLY:
+        {
             // zero roll/pitch, but keep yaw
             float r, p, y;
             dcm.to_euler(&r, &p, &y);
-            if (velocity_ef.length() < 5) {
+            if (velocity_ef.length() < 5)
+            {
                 // at high speeds don't constrain pitch, otherwise we
                 // can get stuck in takeoff
                 p = 0;
-            } else {
+            }
+            else
+            {
                 p = MAX(p, 0);
             }
             y = y + yaw_rate * delta_time;
@@ -795,7 +956,8 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
             // only fwd movement
             Vector3f v_bf = dcm.transposed() * velocity_ef;
             v_bf.y = 0.0f;
-            if (v_bf.x < 0.0f) {
+            if (v_bf.x < 0.0f)
+            {
                 v_bf.x = 0.0f;
             }
 
@@ -804,15 +966,17 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
             // lateral speed equals ground movement
             v_bf.y = gnd_movement_bf.y;
 
-            if (!gnd_movement_bf.is_zero()) {
+            if (!gnd_movement_bf.is_zero())
+            {
                 // fwd speed slowly approaches ground movement to simulate wheel friction
                 const float tconst = 20; // seconds
-                const float alpha = delta_time/(delta_time+tconst/M_2PI);
+                const float alpha = delta_time / (delta_time + tconst / M_2PI);
                 v_bf.x += (gnd_movement.x - v_bf.x) * alpha;
             }
 
             velocity_ef = dcm * v_bf;
-            if (velocity_ef.z > 0.0f) {
+            if (velocity_ef.z > 0.0f)
+            {
                 velocity_ef.z = 0.0f;
             }
             gyro.zero();
@@ -820,7 +984,8 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
             use_smoothing = true;
             break;
         }
-        case GROUND_BEHAVIOR_TAILSITTER: {
+        case GROUND_BEHAVIOR_TAILSITTER:
+        {
             // rotate normal refernce frame to get yaw angle, then rotate back
             Matrix3f rot;
             rot.from_rotation(ROTATION_PITCH_270);
@@ -833,7 +998,8 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
             // X, Y movement tracks ground movement
             velocity_ef.x = gnd_movement.x;
             velocity_ef.y = gnd_movement.y;
-            if (velocity_ef.z > 0.0f) {
+            if (velocity_ef.z > 0.0f)
+            {
                 velocity_ef.z = 0.0f;
             }
             gyro.zero();
@@ -849,13 +1015,8 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
     sitl->models.slung_payload_sim.update(get_position_relhome(), velocity_ef, accel_earth, wind_ef);
 #endif
 
-    // update tether
-#if AP_SIM_TETHER_ENABLED
-    sitl->models.tether_sim.update(location);
-#endif
-
     // allow for changes in physics step
-    adjust_frame_time(constrain_float(sitl->loop_rate_hz, rate_hz-1, rate_hz+1));
+    adjust_frame_time(constrain_float(sitl->loop_rate_hz, rate_hz - 1, rate_hz + 1));
 }
 
 /*
@@ -864,21 +1025,23 @@ void Aircraft::update_dynamics(const Vector3f &rot_accel)
 void Aircraft::update_wind(const struct sitl_input &input)
 {
     // wind vector in earth frame
-    wind_ef = Vector3f(cosf(radians(input.wind.direction))*cosf(radians(input.wind.dir_z)), 
-                       sinf(radians(input.wind.direction))*cosf(radians(input.wind.dir_z)), 
-                       sinf(radians(input.wind.dir_z))) * input.wind.speed;
+    wind_ef = Vector3f(cosf(radians(input.wind.direction)) * cosf(radians(input.wind.dir_z)),
+                       sinf(radians(input.wind.direction)) * cosf(radians(input.wind.dir_z)),
+                       sinf(radians(input.wind.dir_z))) *
+              input.wind.speed;
 
     wind_ef.z += get_local_updraft(position + home.get_distance_NED_double(origin));
 
-    const float wind_turb = input.wind.turbulence * 10.0f;  // scale input.wind.turbulence to match standard deviation when using iir_coef=0.98
-    const float iir_coef = 0.98f;  // filtering high frequencies from turbulence
+    const float wind_turb = input.wind.turbulence * 10.0f; // scale input.wind.turbulence to match standard deviation when using iir_coef=0.98
+    const float iir_coef = 0.98f;                          // filtering high frequencies from turbulence
 
-    if (wind_turb > 0 && !on_ground()) {
+    if (wind_turb > 0 && !on_ground())
+    {
 
         turbulence_azimuth = turbulence_azimuth + (2 * rand());
 
         turbulence_horizontal_speed =
-                static_cast<float>(turbulence_horizontal_speed * iir_coef+wind_turb * rand_normal(0, 1) * (1 - iir_coef));
+            static_cast<float>(turbulence_horizontal_speed * iir_coef + wind_turb * rand_normal(0, 1) * (1 - iir_coef));
 
         turbulence_vertical_speed = static_cast<float>((turbulence_vertical_speed * iir_coef) + (wind_turb * rand_normal(0, 1) * (1 - iir_coef)));
 
@@ -899,7 +1062,8 @@ void Aircraft::smooth_sensors(void)
 {
     uint64_t now = time_now_us;
     Vector3d delta_pos = position - smoothing.position;
-    if (smoothing.last_update_us == 0 || delta_pos.length() > 10) {
+    if (smoothing.last_update_us == 0 || delta_pos.length() > 10)
+    {
         smoothing.position = position;
         smoothing.rotation_b2e = dcm;
         smoothing.accel_body = accel_body;
@@ -911,7 +1075,8 @@ void Aircraft::smooth_sensors(void)
         return;
     }
     const float delta_time = (now - smoothing.last_update_us) * 1.0e-6f;
-    if (delta_time < 0 || delta_time > 0.1) {
+    if (delta_time < 0 || delta_time > 0.1)
+    {
         return;
     }
 
@@ -970,7 +1135,6 @@ void Aircraft::smooth_sensors(void)
                                            degrees(R2), degrees(P2), degrees(Y2));
 #endif
 
-
     // integrate to get new attitude
     smoothing.rotation_b2e.rotate(smoothing.gyro * delta_time);
     smoothing.rotation_b2e.normalize();
@@ -981,7 +1145,7 @@ void Aircraft::smooth_sensors(void)
 
     smoothing.location = origin;
     smoothing.location.offset(smoothing.position.x, smoothing.position.y);
-    smoothing.location.alt  = static_cast<int32_t>(home.alt - smoothing.position.z * 100.0f);
+    smoothing.location.alt = static_cast<int32_t>(home.alt - smoothing.position.z * 100.0f);
 
     smoothing.last_update_us = now;
 }
@@ -1022,7 +1186,7 @@ void Aircraft::extrapolate_sensors(float delta_time)
 
     // work out acceleration as seen by the accelerometers. It sees the kinematic
     // acceleration (ie. real movement), plus gravity
-    accel_body = dcm.transposed() * (accel_earth + Vector3f(0,0,-GRAVITY_MSS));
+    accel_body = dcm.transposed() * (accel_earth + Vector3f(0, 0, -GRAVITY_MSS));
 
     // new velocity and position vectors
     velocity_ef += accel_earth * delta_time;
@@ -1034,31 +1198,41 @@ void Aircraft::extrapolate_sensors(float delta_time)
 bool Aircraft::Clamp::clamped(Aircraft &aircraft, const struct sitl_input &input)
 {
     const auto clamp_ch = AP::sitl()->clamp_ch;
-    if (clamp_ch < 1) {
+    if (clamp_ch < 1)
+    {
         return false;
     }
     const uint32_t clamp_idx = clamp_ch - 1;
-    if (clamp_idx > ARRAY_SIZE(input.servos)) {
+    if (clamp_idx > ARRAY_SIZE(input.servos))
+    {
         return false;
     }
     const uint16_t servo_pos = input.servos[clamp_idx];
     bool new_clamped = currently_clamped;
-    if (servo_pos < 1200) {
-        if (currently_clamped) {
+    if (servo_pos < 1200)
+    {
+        if (currently_clamped)
+        {
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SITL: Clamp: released vehicle");
             new_clamped = false;
         }
         grab_attempted = false;
-    } else {
+    }
+    else
+    {
         // re-clamp if < 10cm from home
-        if (servo_pos > 1800 && !grab_attempted) {
+        if (servo_pos > 1800 && !grab_attempted)
+        {
             const Vector3d pos = aircraft.get_position_relhome();
             const float distance_from_home = pos.length();
             // GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SITL: Clamp: dist=%f", distance_from_home);
-            if (distance_from_home < 0.5) {
+            if (distance_from_home < 0.5)
+            {
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SITL: Clamp: grabbed vehicle");
                 new_clamped = true;
-            } else if (!grab_attempted) {
+            }
+            else if (!grab_attempted)
+            {
                 GCS_SEND_TEXT(MAV_SEVERITY_INFO, "SITL: Clamp: missed vehicle");
             }
             grab_attempted = true;
@@ -1075,88 +1249,97 @@ void Aircraft::update_external_payload(const struct sitl_input &input)
     external_payload_mass = 0;
 
     // update sprayer
-    if (sprayer && sprayer->is_enabled()) {
+    if (sprayer && sprayer->is_enabled())
+    {
         sprayer->update(input);
         external_payload_mass += sprayer->payload_mass();
     }
 
     {
         const float range = rangefinder_range();
-        if (!isinf(range) && range > 100000) {
+        if (!isinf(range) && range > 100000)
+        {
             AP_HAL::panic("Bad rangefinder calculation");
         }
-        for (uint8_t i=0; i<ARRAY_SIZE(rangefinder_m); i++) {
+        for (uint8_t i = 0; i < ARRAY_SIZE(rangefinder_m); i++)
+        {
             rangefinder_m[i] = range;
         }
     }
 
     // update i2c
-    if (i2c) {
+    if (i2c)
+    {
         i2c->update(*this);
     }
 
     // update buzzer
-    if (buzzer && buzzer->is_enabled()) {
+    if (buzzer && buzzer->is_enabled())
+    {
         buzzer->update(input);
     }
 
     // update grippers
-    if (gripper && gripper->is_enabled()) {
+    if (gripper && gripper->is_enabled())
+    {
         gripper->set_alt(hagl());
         gripper->update(input);
         external_payload_mass += gripper->payload_mass();
     }
-    if (gripper_epm && gripper_epm->is_enabled()) {
+    if (gripper_epm && gripper_epm->is_enabled())
+    {
         gripper_epm->update(input);
         external_payload_mass += gripper_epm->payload_mass();
     }
 
     // update parachute
-    if (parachute && parachute->is_enabled()) {
+    if (parachute && parachute->is_enabled())
+    {
         parachute->update(input);
         // TODO: add drag to vehicle, presumably proportional to velocity
     }
 
-    if (precland && precland->is_enabled()) {
+    if (precland && precland->is_enabled())
+    {
         precland->update(get_location());
-        if (precland->_over_precland_base) {
+        if (precland->_over_precland_base)
+        {
             local_ground_level += precland->_device_height;
         }
     }
 
     // update RichenPower generator
-    if (richenpower) {
+    if (richenpower)
+    {
         richenpower->update(input);
     }
 
 #if AP_SIM_LOWEHEISER_ENABLED
     // update Loweheiser generator
-    if (loweheiser) {
+    if (loweheiser)
+    {
         loweheiser->update();
     }
 #endif
 
-    if (fetteconewireesc) {
+    if (fetteconewireesc)
+    {
         fetteconewireesc->update(*this);
     }
-
-#if AP_SIM_VOLZ_ENABLED
-    if (volz) {
-        volz->update(*this);
-    }
-#endif  // AP_SIM_VOLZ_ENABLED
 
 #if AP_SIM_SHIP_ENABLED
     sitl->models.shipsim.update();
 #endif
 
     // update IntelligentEnergy 2.4kW generator
-    if (ie24) {
+    if (ie24)
+    {
         ie24->update(input);
     }
 
 #if AP_TEST_DRONECAN_DRIVERS
-    if (dronecan) {
+    if (dronecan)
+    {
         dronecan->update();
     }
 #endif
@@ -1178,21 +1361,27 @@ void Aircraft::update_external_payload(const struct sitl_input &input)
 void Aircraft::add_shove_forces(Vector3f &rot_accel, Vector3f &body_accel)
 {
     const uint32_t now = AP_HAL::millis();
-    if (sitl == nullptr) {
+    if (sitl == nullptr)
+    {
         return;
     }
-    if (sitl->shove.t == 0) {
+    if (sitl->shove.t == 0)
+    {
         return;
     }
-    if (sitl->shove.start_ms == 0) {
+    if (sitl->shove.start_ms == 0)
+    {
         sitl->shove.start_ms = now;
     }
-    if (now - sitl->shove.start_ms < uint32_t(sitl->shove.t)) {
+    if (now - sitl->shove.start_ms < uint32_t(sitl->shove.t))
+    {
         // FIXME: can we get a vector operation here instead?
         body_accel.x += sitl->shove.x;
         body_accel.y += sitl->shove.y;
         body_accel.z += sitl->shove.z;
-    } else {
+    }
+    else
+    {
         sitl->shove.start_ms = 0;
         sitl->shove.t.set(0);
     }
@@ -1202,7 +1391,7 @@ float Aircraft::get_local_updraft(const Vector3d &currentPos)
 {
     int scenario = sitl->thermal_scenario;
 
-    #define MAX_THERMALS 10
+#define MAX_THERMALS 10
 
     float thermals_w[MAX_THERMALS];
     float thermals_r[MAX_THERMALS];
@@ -1211,55 +1400,57 @@ float Aircraft::get_local_updraft(const Vector3d &currentPos)
 
     int n_thermals = 0;
 
-    switch (scenario) {
-        case 0:
-            return 0;
-        case 1:
-            n_thermals = 1;
-            thermals_w[0] =  2.0;
-            thermals_r[0] =  80.0;
-            thermals_x[0] = -180.0;
-            thermals_y[0] = -260.0;
-            break;
-        case 2:
-            n_thermals = 1;
-            thermals_w[0] =  4.0;
-            thermals_r[0] =  30.0;
-            thermals_x[0] = -180.0;
-            thermals_y[0] = -260.0;
-            break;
-        case 3:
-            n_thermals = 1;
-            thermals_w[0] =  2.0;
-            thermals_r[0] =  30.0;
-            thermals_x[0] = -180.0;
-            thermals_y[0] = -260.0;
-            break;
-        case 4:
-            n_thermals = 1;
-            thermals_w[0] =  5.0;
-            thermals_r[0] =  30.0;
-            thermals_x[0] =  0;
-            thermals_y[0] =  0;
-            break;
-        default:
-            AP_BoardConfig::config_error("Bad thermal scenario");
+    switch (scenario)
+    {
+    case 0:
+        return 0;
+    case 1:
+        n_thermals = 1;
+        thermals_w[0] = 2.0;
+        thermals_r[0] = 80.0;
+        thermals_x[0] = -180.0;
+        thermals_y[0] = -260.0;
+        break;
+    case 2:
+        n_thermals = 1;
+        thermals_w[0] = 4.0;
+        thermals_r[0] = 30.0;
+        thermals_x[0] = -180.0;
+        thermals_y[0] = -260.0;
+        break;
+    case 3:
+        n_thermals = 1;
+        thermals_w[0] = 2.0;
+        thermals_r[0] = 30.0;
+        thermals_x[0] = -180.0;
+        thermals_y[0] = -260.0;
+        break;
+    case 4:
+        n_thermals = 1;
+        thermals_w[0] = 5.0;
+        thermals_r[0] = 30.0;
+        thermals_x[0] = 0;
+        thermals_y[0] = 0;
+        break;
+    default:
+        AP_BoardConfig::config_error("Bad thermal scenario");
     }
 
     // Wind drift at this altitude
-    float driftX = sitl->wind_speed * (currentPos.z+100) * cosf(sitl->wind_direction * DEG_TO_RAD);
-    float driftY = sitl->wind_speed * (currentPos.z+100) * sinf(sitl->wind_direction * DEG_TO_RAD);
+    float driftX = sitl->wind_speed * (currentPos.z + 100) * cosf(sitl->wind_direction * DEG_TO_RAD);
+    float driftY = sitl->wind_speed * (currentPos.z + 100) * sinf(sitl->wind_direction * DEG_TO_RAD);
 
     int iThermal;
     float w = 0.0f;
     float r2;
-    for (iThermal=0;iThermal<n_thermals;iThermal++) {
-        Vector3d thermalPos(thermals_x[iThermal] + driftX/thermals_w[iThermal],
-                            thermals_y[iThermal] + driftY/thermals_w[iThermal],
+    for (iThermal = 0; iThermal < n_thermals; iThermal++)
+    {
+        Vector3d thermalPos(thermals_x[iThermal] + driftX / thermals_w[iThermal],
+                            thermals_y[iThermal] + driftY / thermals_w[iThermal],
                             0);
         Vector3d relVec = currentPos - thermalPos;
-        r2 = relVec.x*relVec.x + relVec.y*relVec.y;
-        w += thermals_w[iThermal]*exp(-r2/(thermals_r[iThermal]*thermals_r[iThermal]));
+        r2 = relVec.x * relVec.x + relVec.y * relVec.y;
+        w += thermals_w[iThermal] * exp(-r2 / (thermals_r[iThermal] * thermals_r[iThermal]));
     }
 
     return w;
@@ -1267,53 +1458,53 @@ float Aircraft::get_local_updraft(const Vector3d &currentPos)
 
 void Aircraft::add_twist_forces(Vector3f &rot_accel)
 {
-    if (sitl == nullptr) {
+    if (sitl == nullptr)
+    {
         return;
     }
-    if (sitl->gnd_behav != -1) {
+    if (sitl->gnd_behav != -1)
+    {
         ground_behavior = (GroundBehaviour)sitl->gnd_behav.get();
     }
     const uint32_t now = AP_HAL::millis();
-    if (sitl == nullptr) {
+    if (sitl == nullptr)
+    {
         return;
     }
-    if (sitl->twist.t == 0) {
+    if (sitl->twist.t == 0)
+    {
         return;
     }
-    if (sitl->twist.start_ms == 0) {
+    if (sitl->twist.start_ms == 0)
+    {
         sitl->twist.start_ms = now;
     }
-    if (now - sitl->twist.start_ms < uint32_t(sitl->twist.t)) {
+    if (now - sitl->twist.start_ms < uint32_t(sitl->twist.t))
+    {
         // FIXME: can we get a vector operation here instead?
         rot_accel.x += sitl->twist.x;
         rot_accel.y += sitl->twist.y;
         rot_accel.z += sitl->twist.z;
-    } else {
+    }
+    else
+    {
         sitl->twist.start_ms = 0;
         sitl->twist.t.set(0);
     }
 }
 
-// add body-frame force due to slung payload and tether
-void Aircraft::add_external_forces(Vector3f &body_accel)
-{
-    Vector3f total_force;
 #if AP_SIM_SLUNGPAYLOAD_ENABLED
-    Vector3f forces_ef_slung;
-    sitl->models.slung_payload_sim.get_forces_on_vehicle(forces_ef_slung);
-    total_force += forces_ef_slung;
-#endif
-
-#if AP_SIM_TETHER_ENABLED
-    Vector3f forces_ef_tether;
-    sitl->models.tether_sim.get_forces_on_vehicle(forces_ef_tether);
-    total_force += forces_ef_tether;
-#endif
+// add body-frame force due to slung payload
+void Aircraft::add_slungpayload_forces(Vector3f &body_accel)
+{
+    Vector3f forces_ef;
+    sitl->models.slung_payload_sim.get_forces_on_vehicle(forces_ef);
 
     // convert ef forces to body-frame accelerations (acceleration = force / mass)
-    const Vector3f accel_bf_tether = dcm.transposed() * total_force / mass;
-    body_accel += accel_bf_tether;
+    const Vector3f accel_bf = dcm.transposed() * forces_ef / mass;
+    body_accel += accel_bf;
 }
+#endif
 
 /*
   get position relative to home
@@ -1344,16 +1535,19 @@ void Aircraft::update_eas_airspeed()
     airspeed_pitot = airspeed;
 
     // calculate angle between the local flow vector and a pitot tube aligned with the X body axis
-    const float pitot_aoa =  atan2f(sqrtf(sq(velocity_air_bf.y) + sq(velocity_air_bf.z)), velocity_air_bf.x);
+    const float pitot_aoa = atan2f(sqrtf(sq(velocity_air_bf.y) + sq(velocity_air_bf.z)), velocity_air_bf.x);
 
     /*
       assume the pitot can correctly capture airspeed up to 20 degrees off the nose
       and follows a cose law outside that range
     */
     const float max_pitot_aoa = radians(20);
-    if (pitot_aoa > radians(90)) {
+    if (pitot_aoa > radians(90))
+    {
         airspeed_pitot = 0;
-    } else if (pitot_aoa > max_pitot_aoa) {
+    }
+    else if (pitot_aoa > max_pitot_aoa)
+    {
         const float gain_factor = M_PI_2 / (radians(90) - max_pitot_aoa);
         airspeed_pitot *= cosf((pitot_aoa - max_pitot_aoa) * gain_factor);
     }
