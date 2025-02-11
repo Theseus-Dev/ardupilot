@@ -847,6 +847,22 @@ void Aircraft::update_model(const struct sitl_input &input)
  */
 void Aircraft::update_dynamics(const Vector3f &rot_accel)
 {
+
+    // static const char *reset_file = "/tmp/reset";
+    // FILE *fp = fopen(reset_file, "r");
+    // if (fp != nullptr)
+    // {
+    //     // File exists, trigger reset
+    //     fclose(fp);
+    //     remove(reset_file); // Remove the file after reading
+
+    //     // Reset velocity and acceleration states
+    //     velocity_ef.zero();
+    //     velocity_air_ef.zero();
+    //     velocity_air_bf.zero();
+    //     accel_body.zero();
+    //     gyro.zero();
+    // }
     // update eas2tas and air density
 #if AP_AHRS_ENABLED
     eas2tas = AP::ahrs().get_EAS2TAS();
